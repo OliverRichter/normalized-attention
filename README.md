@@ -1,7 +1,7 @@
 # Normalized Attention Pooling
 
 This repository contains the code and results of the experiments presented in the paper 
-"Normalized Attention: Removing the Softmax Cage".
+"Normalized Attention Without Probability Cage".
 
 ## Setup
 Requirements: Conda (https://docs.conda.io/en/latest/)
