@@ -288,8 +288,11 @@ def display_animation(images, name):
                                           variations[1]['range']) for exp in yrange])
             else:
                 plt.yticks(yrange, [y + variations[1]['min'] for y in yrange])
+        print("Creating your animation...")
         animation = ani.ArtistAnimation(fig, frames, blit=True, repeat_delay=1000)
         animation.save('animations/' + model + '.gif', writer='imagemagick', fps=6)
+        print("Your animation is saved to: animations/" + model + '.gif')
+        plt.close()
 
 
 def show_learning_curves(images, name):
