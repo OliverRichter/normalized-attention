@@ -28,4 +28,4 @@ Run
 ```bash
 python train.py -h
 ```
-to see the available options.
+to see the available options. For the reinforcement learning experiments we provide a separate shell script in the wmg_agent subfolder.
