@@ -1,0 +1,13 @@
+name: babyai
+channels:
+    - pytorch
+    - defaults
+dependencies:
+    - python=3.6
+    - pytorch=0.4.1
+    - torchvision
+    - pyqt
+    - numpy
+    - blosc
+    - pip:
+        - gym

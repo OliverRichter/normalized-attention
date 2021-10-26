@@ -1,6 +1,7 @@
 from models import create_model
 from optimization import WarmUpThenLinDecaySchedule, ClipAdam
-from task_generators import create_argmin_first_argmax_batch, create_mode_batch, CaseEvaluationCallback
+from task_generators import create_argmin_first_argmax_batch, create_mode_batch, create_local_global_batch,\
+    CaseEvaluationCallback
 import numpy as np
 import tensorflow as tf
 import pickle
@@ -8,7 +9,7 @@ import argparse
 import os
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--task', type=str, default='cases', choices=['cases', 'mode'],
+parser.add_argument('--task', type=str, default='cases', choices=['cases', 'mode', 'lg', 'ppi'],
                     help="The task to train on, can be either 'cases' for the case distinction/pin-pointing task or "
                          "'mode' for the mode finding task. Defaults to 'cases'.")
 parser.add_argument('-f', '--first_token_output', action='store_true',
@@ -31,6 +32,8 @@ parser.add_argument('-ln', '--BERT_layer_norm_placement', action='store_true',
                          'not on hidden embeddings within the blocks.')
 parser.add_argument('-no_gelu', '--no_non_linearity_in_attention_block', action='store_true',
                     help='Removes the gelu non-linearity on the hidden embeddings in the attention blocks.')
+parser.add_argument('-xy', '--train_only_xy', type=tuple, default=None,
+                    help='Train only the indexed hyperparameter combination.')
 
 # Run order
 parser.add_argument('-rev', '--reverse_run_order',
@@ -53,12 +56,18 @@ parser.add_argument('--prefix', type=str, default='',
                          'Defaults to the current folder.')
 
 args = parser.parse_args()
+xy = None
+if args.train_only_xy:
+    xy = list(map(int, args.train_only_xy))
+    assert len(xy) == 2
 
 # Default configuration
 params = {'layers': 2,
           'heads': 4,
           'model_dimension': 128,
+          'initial_std_factor': 1,
           'max_sequence_length': 128,
+          'case_bias': 0,
           'vocabulary_size': 100,
           'batch_size': 32,
           'learning_rate': 0.3 ** 7,
@@ -66,7 +75,8 @@ params = {'layers': 2,
           'steps_per_epoch': 100,
           'validation_steps': 32,
           'dropout': 0.0,
-          'L2_regularization': 0.0}
+          'L2_regularization': 0.0,
+          'with_attention_mask': False}
 
 experiment_name = ''
 if args.prefix:
@@ -103,6 +113,24 @@ if args.task == 'cases':
     if args.first_token_output:
         experiment_name += 'first_token_output/'
 
+elif args.task == 'lg':  # local vs. global task
+    NUM_CASES = 2
+    positional_embeddings = True
+
+    def last_layer(contextual_embeddings, initializer, regularizer):
+        # project from the first token of size 'Model Dimension' to 'Max Sequence Length' outputs
+        pre_logits = tf.keras.layers.Dense(params['max_sequence_length'],
+                                           kernel_initializer=initializer,
+                                           kernel_regularizer=regularizer)(contextual_embeddings)
+        # slice result in case that the actual sequence length is shorter than 'Max Sequence Length'
+        logits = pre_logits[:, :, :tf.shape(contextual_embeddings)[1]]
+        return logits
+
+    generator = create_local_global_batch
+    loss = tf.keras.losses.CategoricalCrossentropy(from_logits=True)
+    metric = tf.keras.metrics.categorical_accuracy
+    metric_name = 'categorical_accuracy'
+
 elif args.task == 'mode':
     NUM_CASES = 0
     params['vocabulary_size'] = 10  # update default value
@@ -118,6 +146,12 @@ elif args.task == 'mode':
     metric = tf.keras.metrics.sparse_categorical_accuracy
     metric_name = 'sparse_categorical_accuracy'
 
+elif args.task == 'ppi':
+    NUM_CASES = 0
+    params['layers'] = 3
+    from ppi import create_and_run_model
+    metric_name = 'accuracy'
+
 else:
     raise NotImplementedError('Task not recognized')
 
@@ -126,6 +160,16 @@ if args.variation in ['d', 'dim', 'model_dimension']:
     variations = [{'name': 'model_dimension', 'min': 3, 'range': 8, 'base': 2},
                   {'name': 'learning_rate', 'min': 1, 'range': 10, 'base': 0.3}]
     experiment_name += 'var_dim/'
+
+elif args.variation in ['i', 'I', 'init', 'initialization', 'initial_std']:
+    variations = [{'name': 'initial_std_factor', 'min': -3, 'range': 8, 'base': 4},
+                  {'name': 'learning_rate', 'min': 1, 'range': 10, 'base': 0.3}]
+    experiment_name += 'var_init/'
+
+elif args.variation in ['bias', 'case_bias']:
+    variations = [{'name': 'case_bias', 'min': -3, 'range': 8, 'base': False},
+                  {'name': 'learning_rate', 'min': 1, 'range': 10, 'base': 0.3}]
+    experiment_name += 'var_bias/'
 
 elif args.variation in ['l', 'L', 'layers']:
     variations = [{'name': 'layers', 'min': 0, 'range': 7, 'base': 2},
@@ -174,7 +218,7 @@ if args.model in ['b', 'B', 'bert', 'BERT']:
     params.update({'model': 'BERT'})
     experiment_name += 'BERT'
     print("Choosing model 'BERT' overwrites command line arguments regarding learning rate warmup, gradient clipping,"
-          "layer norm placement and non linearity in the attention block to the original BERT configuration. If you"
+          "layer norm placement and non linearity in the attention block to the original BERT configuration. If you "
           "want to specify these, use the 'MTE' model.")
     args.warmup = True
     args.clip_grads = True
@@ -232,7 +276,7 @@ except (OSError, IOError) as e:
                for ____ in range(params['epochs'])]
     start_from = 0
     pickle.dump([variations, params], open(experiment_name + '_params.pickle', 'wb'))
-
+test_results = []
 
 for run in range(start_from, total_training_runs):
     if args.random_run_order:
@@ -245,6 +289,9 @@ for run in range(start_from, total_training_runs):
         else:
             # start with smallest models and iterate to biggest
             indices = [run % variations[0]['range'], (run // variations[0]['range']) % variations[1]['range']]
+
+    if xy and not np.all(np.equal(indices, xy)):
+        continue
 
     for idx, variation in enumerate(variations):
         if variation['base']:
@@ -260,59 +307,70 @@ for run in range(start_from, total_training_runs):
         params['steps_per_epoch'] = 100 * params['vocabulary_size'] // 8
 
     print('-------------------')
-    print('Run ' + str(run + 1) + ' of ' + str(total_training_runs))
+    run_number = run // (total_training_runs // args.training_runs) + 1
+    total_runs = args.training_runs if xy else total_training_runs
+    print('Run ' + str(run_number) + ' of ' + str(total_runs))
     print(params)
     print(variations)
     print(experiment_name)
     print('-------------------')
 
-    model = create_model(positional_embeddings=positional_embeddings,
-                         no_non_linearity_in_attention_block=args.no_non_linearity_in_attention_block,
-                         bert_layer_norm=args.BERT_layer_norm_placement,
-                         last_layer=last_layer,
-                         **params)
-    model.summary()
-
-    total_steps = params['steps_per_epoch'] * params['epochs']
-
-    if args.warmup:
-        learning_rate = WarmUpThenLinDecaySchedule(initial_learning_rate=params['learning_rate'],
-                                                   warm_up_steps=total_steps // 10,
-                                                   total_steps=total_steps)
+    if args.task == 'ppi':
+        history = create_and_run_model(**params)
     else:
-        learning_rate = tf.keras.optimizers.schedules.PolynomialDecay(initial_learning_rate=params['learning_rate'],
-                                                                      decay_steps=total_steps,
-                                                                      end_learning_rate=0.0)
+        model = create_model(positional_embeddings=positional_embeddings,
+                             no_non_linearity_in_attention_block=args.no_non_linearity_in_attention_block,
+                             bert_layer_norm=args.BERT_layer_norm_placement,
+                             last_layer=last_layer,
+                             **params)
+        model.summary()
 
-    optimizer = ClipAdam(learning_rate) if args.clip_grads else tf.keras.optimizers.Adam(learning_rate)
+        total_steps = params['steps_per_epoch'] * params['epochs']
 
-    model.compile(loss=loss, optimizer=optimizer, metrics=[metric])
+        if args.warmup:
+            learning_rate = WarmUpThenLinDecaySchedule(initial_learning_rate=params['learning_rate'],
+                                                       warm_up_steps=total_steps // 10,
+                                                       total_steps=total_steps)
+        else:
+            learning_rate = tf.keras.optimizers.schedules.PolynomialDecay(initial_learning_rate=params['learning_rate'],
+                                                                          decay_steps=total_steps,
+                                                                          end_learning_rate=0.0)
 
-    callbacks = []
-    if args.task == 'cases':
-        callbacks.append(CaseEvaluationCallback(results, indices,
-                                                params['vocabulary_size'],
-                                                params['max_sequence_length']))
-        # validate on sequences of half the length
-        validation_generator = generator(params['vocabulary_size'], params['batch_size'],
-                                         params['max_sequence_length'] // 2)
-    else:
-        # validate on sequences of twice the length
-        validation_generator = generator(params['vocabulary_size'], params['batch_size'],
-                                         params['max_sequence_length'] * 2)
+        optimizer = ClipAdam(learning_rate) if args.clip_grads else tf.keras.optimizers.Adam(learning_rate)
 
-    history = model.fit(generator(params['vocabulary_size'], params['batch_size'], params['max_sequence_length']),
-                        steps_per_epoch=params['steps_per_epoch'],
-                        epochs=params['epochs'],
-                        callbacks=callbacks,
-                        validation_data=validation_generator,
-                        validation_steps=params['validation_steps'])
+        model.compile(loss=loss, optimizer=optimizer, metrics=[metric])
+
+        callbacks = []
+        if args.task in ['cases', 'lg']:
+            callbacks.append(CaseEvaluationCallback(results, indices, params['vocabulary_size'],
+                                                    params['max_sequence_length'], args.task))
+            train_generator = generator(params['vocabulary_size'], params['batch_size'], params['max_sequence_length'],
+                                        params['case_bias'])
+            # validate on sequences of half the length
+            validation_generator = generator(params['vocabulary_size'], params['batch_size'],
+                                             params['max_sequence_length'] // 2)
+        else:
+            train_generator = generator(params['vocabulary_size'], params['batch_size'], params['max_sequence_length'])
+            # validate on sequences of twice the length
+            validation_generator = generator(params['vocabulary_size'], params['batch_size'],
+                                             params['max_sequence_length'] * 2)
+
+        history = model.fit(train_generator,
+                            steps_per_epoch=params['steps_per_epoch'],
+                            epochs=params['epochs'],
+                            callbacks=callbacks,
+                            validation_data=validation_generator,
+                            validation_steps=params['validation_steps'])
 
     for epoch in range(params['epochs']):
-        results[epoch][indices[1]][indices[0]][0].append(history.history[metric_name][epoch])
-        results[epoch][indices[1]][indices[0]][1].append(history.history['val_' + metric_name][epoch])
-        results[epoch][indices[1]][indices[0]][2].append(history.history['loss'][epoch])
-        results[epoch][indices[1]][indices[0]][3].append(history.history['val_loss'][epoch])
+        try:
+            results[epoch][indices[1]][indices[0]][0].append(history.history[metric_name][epoch])
+            results[epoch][indices[1]][indices[0]][1].append(history.history['val_' + metric_name][epoch])
+            results[epoch][indices[1]][indices[0]][2].append(history.history['loss'][epoch])
+            results[epoch][indices[1]][indices[0]][3].append(history.history['val_loss'][epoch])
+        except (IndexError, KeyError) as err:
+            print(err)
     pickle.dump((results, run + 1, int(args.reverse_run_order) + 2 * int(args.random_run_order)),
                 open(RESULTS_FILE, 'wb'))
     tf.keras.backend.clear_session()
+

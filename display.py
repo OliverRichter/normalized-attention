@@ -7,7 +7,7 @@ from os import listdir
 from os.path import isfile, join
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--task', type=str, default='cases', choices=['cases', 'mode'],
+parser.add_argument('--task', type=str, default='cases', choices=['cases', 'mode', 'lg', 'ppi', 'rl'],
                     help="The task to load results from. Can be either 'cases' for the case distinction/pin-pointing "
                          "task or 'mode' for the mode finding task. Defaults to 'cases'.")
 parser.add_argument('-f', '--first_token_output', action='store_true',
@@ -32,6 +32,8 @@ parser.add_argument('-cc', '--all_case_accuracies', action='store_true',
                          "a lot of result plots, as a min-/mean-/max-accuracy plot is generated per case!")
 parser.add_argument('-v', '--validation', action='store_true',
                     help="Flag to additionally display validation results.")
+parser.add_argument('-r', '--robustness', action='store_true',
+                    help="Flag to additionally display robustness curves of the results.")
 parser.add_argument('-a', '--animate', action='store_true',
                     help="Flag to animate plot evolution over the course of training. WARNING: This option will open "
                          "an animation per model! Consider specifying the model of interest with the '--model' option.")
@@ -39,6 +41,8 @@ parser.add_argument('-l', '--learning_curve', action='store_true',
                     help="Flag to display learning curves instead of RGB plots.")
 parser.add_argument('-p', '--print_numbers', action='store_true',
                     help="Prints numeric values of the result.")
+parser.add_argument('-pm', '--print_max_numbers', action='store_true',
+                    help="Prints only max numeric values of the result.")
 parser.add_argument('--prefix', type=str, default='paper_results/',
                     help="Prefix to specify the location from where the results should be loaded. Defaults to the "
                          "'paper_results' folder.")
@@ -58,6 +62,12 @@ if args.variation in ['d', 'dim', 'model_dimension']:
 elif args.variation in ['l', 'L', 'layers']:
     prefix += 'var_layers/'
 
+elif args.variation in ['i', 'I', 'init', 'initialization', 'initial_std']:
+    prefix += 'var_init/'
+
+elif args.variation in ['bias', 'case_bias']:
+    prefix += 'var_bias/'
+
 elif args.variation in ['h', 'H', 'm', 'M', 'heads']:
     prefix += 'var_heads/'
 
@@ -70,12 +80,6 @@ elif args.variation in ['b', 'bs', 'batch', 'batch_size']:
 elif args.variation in ['v', 'vs', 'vocab', 'vocabulary_size']:
     prefix += 'var_vocab/'
 
-elif args.variation in ['drop', 'dropout']:
-    prefix += 'var_dropout_1_4_0.5/'
-
-elif args.variation in ['r', 'reg', 'l2', 'regularization']:
-    prefix += 'var_l2_regularization_1_4_0.1/'
-
 else:
     raise NotImplementedError('Variation not recognised')
 
@@ -83,7 +87,7 @@ model_names = [file.replace('.pickle', '')
                for file in listdir(prefix) if isfile(join(prefix, file)) and 'params' not in file]
 
 if args.model != 'all':
-    model_names = [model_name for model_name in model_names if args.model in model_name]
+    model_names = [model_name for model_name in model_names if model_name in args.model]
 
 print('\n----> Showing results from', prefix, '<----')
 
@@ -103,6 +107,7 @@ for model in model_names:
               'The number of random seeds per hyper-parameter combination is not consistent.')
     result_array.append(np.asarray(results).tolist())
 
+print('\n')
 result_array = np.asarray(result_array)
 if len(result_array.shape) < 5:
     raise AssertionError("Results don't match")
@@ -137,27 +142,64 @@ if len(result_array.shape) < 6:
                                                    results.shape[:4]))
         return np.stack(min_mean_max_results, axis=-1)
 else:
+    min_run_number = None
+
     def get_min_mean_max(results, enumerator=None):
         if enumerator is not None:
             results /= enumerator
         return np.stack([np.min(results, axis=-1), np.mean(results, axis=-1), np.max(results, axis=-1)], axis=-1)
 
+robustness = []
+for model_id, model in enumerate(model_names):
+    if min_run_number is not None:
+        flat_results = np.reshape(result_array, (-1,))
+        tmp_results = np.asarray(list(map(lambda result: result[:min_run_number],
+                                          flat_results))).reshape(result_array.shape + (min_run_number,))
+    else:
+        tmp_results = result_array
+    model_validation_results = tmp_results[model_id, :, :, :, 1]
+    hyperpar_index = np.unravel_index(np.argmax(np.mean(np.max(model_validation_results, axis=0), axis=-1)),
+                                      (variations[1]['range'], variations[0]['range']))
+    epoch_indices = np.argmax(model_validation_results[:, hyperpar_index[0], hyperpar_index[1]], axis=0)
+    test_idx = 3 if args.task == 'ppi' else 1  # only ppi has actual test results, otherwise take validation results
+    test_results = []
+    for run, epoch_idx in enumerate(epoch_indices):
+        test_results.append(tmp_results[model_id, epoch_idx, hyperpar_index[0], hyperpar_index[1], test_idx, run])
+
+    sorted_results = np.sort(np.mean(np.max(model_validation_results, axis=0), axis=-1).reshape((-1,)))[::-1]
+    robustness.append(sorted_results)
+
+    print('------')
+    print(model)
+    print('Best results at: ', reversed(hyperpar_index))
+    print(test_results)
+    print(np.mean(test_results), '+/-', np.std(test_results))
+
+if args.robustness:
+    plt.title('Robustness of the models')
+    plt.xlabel('Hyperparamter combinations')
+    plt.ylabel('Accuracy')
+    for model_robustness in robustness:
+        plt.plot(np.transpose(model_robustness))
+    plt.legend(model_names)
+    plt.show()
 
 results_to_display = {}
 
 
 def load_case_results(validation=False):
-    if args.task == 'mode':
-        raise NotImplementedError('The mode task does not have a case distinction and therefore no case results.')
-    case_result_indices = [4, 6, 9]
+    if args.task not in ['cases', 'lg']:
+        raise NotImplementedError('The `cases` task and `lg` task have a case distinction and case results.')
+    case_result_indices = [4, 6, 9] if args.task == 'cases' else [4, 5, 5]
+    num_cases = 7 if args.task == 'cases' else 2
     name_addition = ''
     if validation:
-        case_result_indices = [18, 20, 23]
+        case_result_indices = [18, 20, 23] if args.task == 'cases' else [8, 9, 9]
         name_addition = 'Validation '
     case_results = []
     for case, case_result_idx in zip(['argmin', 'first', 'argmax'], case_result_indices):
-        case_result = get_min_mean_max(result_array[:, :, :, :, case_result_idx],
-                                       result_array[:, :, :, :, case_result_idx + 7])
+        case_result = get_min_mean_max(result_array[:, :, :, :, case_result_idx].copy(),
+                                       result_array[:, :, :, :, case_result_idx + num_cases].copy())
         if args.all_case_accuracies:
             results_to_display.update({'Case ' + case + ' Min Mean Max ' + name_addition: case_result})
         case_results.append(case_result)
@@ -189,7 +231,7 @@ def display_images(images, name, only_best=True):
             plt.subplot(round(float(len(model_names)) / 2.0 + 0.1), 2, model_id + 1)
             plt.imshow(result_image[model_id], interpolation=None)
             plt.title(model)
-            if args.print_numbers:
+            if args.print_numbers or args.print_max_numbers:
                 print('\n', model + name)
                 max_values = [-np.inf, -np.inf, -np.inf]
                 max_values_idx = [0, 0]
@@ -198,7 +240,8 @@ def display_images(images, name, only_best=True):
                         if value[1] > max_values[1]:
                             max_values = value
                             max_values_idx = [y_idx, x_idx]
-                        print(y_idx, x_idx, str(value[0]) + ',' + str(value[1]) + ',' + str(value[2]))
+                        if args.print_numbers:
+                            print(y_idx, x_idx, str(value[0]) + ',' + str(value[1]) + ',' + str(value[2]))
                 print('Max values: ', max_values, 'at', max_values_idx)
             plt.xlabel(variations[0]['name'])
             if variations[0]['base']:

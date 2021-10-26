@@ -33,10 +33,10 @@ class ClipAdam(tf.keras.optimizers.Adam):
     fix will only ship with TF2.2.
     See https://github.com/tensorflow/tensorflow/commit/69da929ad4d5ba605507efa1f52b382a55b6a969 for reference.
     """
-    def apply_gradients(self, grads_and_vars, name=None):
+    def apply_gradients(self, grads_and_vars, name=None, **kwargs):
         grads = []
         vars = []
         for grad, var in grads_and_vars:
             grads.append(tf.clip_by_norm(grad, GRAD_CLIP_NORM))
             vars.append(var)
-        return super(ClipAdam, self).apply_gradients(zip(grads, vars), name=name)
+        return super(ClipAdam, self).apply_gradients(zip(grads, vars), name=name, **kwargs)
