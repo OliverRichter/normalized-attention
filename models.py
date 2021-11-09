@@ -289,6 +289,13 @@ def create_model(vocabulary_size,
                                          attention_dropout_probability=dropout,
                                          hidden_normalization=hidden_normalization,
                                          hidden_non_linearity=hidden_non_linearity)((embeddings, attention_mask))
+        elif model == 'w':
+            print(embeddings.shape)
+            embeddings_transposed = tf.transpose(embeddings, [0, 2, 1])
+            embeddings_transposed = tf.ensure_shape(embeddings_transposed, [None, model_dimension, max_sequence_length])
+            pooling_out = tf.transpose(Dense(max_sequence_length, activation=None,
+                                             kernel_initializer=initializer,
+                                             kernel_regularizer=regularizer)(embeddings_transposed), [0, 2, 1])
         elif model == 'sum':
             if with_attention_mask:
                 embeddings = attention_mask[:, 0, 0, :, None] * embeddings

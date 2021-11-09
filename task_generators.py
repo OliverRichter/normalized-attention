@@ -121,12 +121,13 @@ def eval_cases(model, inputs, labels, cases, case_strings):
 
 
 class CaseEvaluationCallback(tf.keras.callbacks.Callback):
-    def __init__(self, results_buffer, indices, vocab_size, sequence_length, task, **kwargs):
+    def __init__(self, results_buffer, indices, vocab_size, sequence_length, task, validate, **kwargs):
         super(CaseEvaluationCallback, self).__init__(**kwargs)
         self.results = results_buffer
         self.indices = indices
         self.vocab_size = vocab_size
         self.seq_len = sequence_length
+        self.validate = validate
         if task == 'cases':
             self.equalized_dataset = create_argmin_first_argmax_equalized_dataset
             self.num_cases = 7
@@ -144,15 +145,18 @@ class CaseEvaluationCallback(tf.keras.callbacks.Callback):
         offset += self.num_cases
         for idx in range(self.num_cases):
             self.results[epoch][self.indices[1]][self.indices[0]][idx + offset].append(case_results[1][idx])
-        x, y, cases, case_str = self.equalized_dataset(self.vocab_size, 3000, self.seq_len // 2)
-        print('Validation set case accurracy: ')
-        validation_case_results = eval_cases(self.model, x, y, cases, case_str)
-        offset += self.num_cases
-        for idx in range(self.num_cases):
-            self.results[epoch][self.indices[1]][self.indices[0]][idx + offset].append(validation_case_results[0][idx])
-        offset += self.num_cases
-        for idx in range(self.num_cases):
-            self.results[epoch][self.indices[1]][self.indices[0]][idx + offset].append(validation_case_results[1][idx])
+        if self.validate:
+            x, y, cases, case_str = self.equalized_dataset(self.vocab_size, 3000, self.seq_len // 2)
+            print('Validation set case accurracy: ')
+            validation_case_results = eval_cases(self.model, x, y, cases, case_str)
+            offset += self.num_cases
+            for idx in range(self.num_cases):
+                self.results[epoch][self.indices[1]][self.indices[0]][idx + offset].append(
+                    validation_case_results[0][idx])
+            offset += self.num_cases
+            for idx in range(self.num_cases):
+                self.results[epoch][self.indices[1]][self.indices[0]][idx + offset].append(
+                    validation_case_results[1][idx])
 
 
 @generator

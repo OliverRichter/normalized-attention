@@ -18,6 +18,8 @@ parser.add_argument('-f', '--first_token_output', action='store_true',
 parser.add_argument('--variation', type=str, default='model_dimension',
                     help="Option to specify the hyperparamerer over which to sweep over. Can be abbreviated, "
                          "e.g., 'b' for 'batch_size'. Defaults to 'model_dimension'.")
+parser.add_argument('-sv', '--skip_validation', action='store_true',
+                    help='Skip validation on sequences of other length')
 parser.add_argument('-t', '--training_runs', type=int, default=5,
                     help='Number of random seeds to use per hyper parameter combination. Defaults to 5.')
 parser.add_argument('--model', type=str, default='NAP',
@@ -245,6 +247,11 @@ elif args.model in ['m', 'mp', 'max', 'max_pooling']:
     params.update({'model': 'max'})
     experiment_name += 'max'
 
+elif args.model in ['weighted']:
+    params.update({'model': 'w'})
+    experiment_name += 'w'
+    args.skip_validation = True  # cannot validate sequence length dependent model
+
 else:
     raise NotImplementedError('Model not recognised')
 
@@ -343,12 +350,15 @@ for run in range(start_from, total_training_runs):
         callbacks = []
         if args.task in ['cases', 'lg']:
             callbacks.append(CaseEvaluationCallback(results, indices, params['vocabulary_size'],
-                                                    params['max_sequence_length'], args.task))
+                                                    params['max_sequence_length'], args.task,
+                                                    not args.skip_validation))
             train_generator = generator(params['vocabulary_size'], params['batch_size'], params['max_sequence_length'],
                                         params['case_bias'])
             # validate on sequences of half the length
             validation_generator = generator(params['vocabulary_size'], params['batch_size'],
                                              params['max_sequence_length'] // 2)
+            if args.skip_validation:
+                params['validation_steps'] = 0
         else:
             train_generator = generator(params['vocabulary_size'], params['batch_size'], params['max_sequence_length'])
             # validate on sequences of twice the length
