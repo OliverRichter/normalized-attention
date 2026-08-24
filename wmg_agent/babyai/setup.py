@@ -8,7 +8,7 @@ setup(
     packages=['babyai', 'babyai.levels', 'babyai.utils'],
     install_requires=[
         'gym>=0.9.6',
-        'numpy==1.15.4', # Temporary: fix numpy version because of bug introduced in 1.16
+        'numpy==1.22.0', # Temporary: fix numpy version because of bug introduced in 1.16
         'pyqt5>=5.10.1',
         "torch>=0.4.1",
         'blosc>=1.5.1',
